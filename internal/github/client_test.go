@@ -143,16 +143,18 @@ func TestGetManifest_Missing(t *testing.T) {
 }
 
 func TestListVersions_TakesNewestSemverAndSkipsPrerelease(t *testing.T) {
+	// The github client returns every stable, semver-tagged release
+	// newest-first — no cap. The registry-side top-N truncation is a
+	// crawl-package concern and is not exercised here.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/foo/bar/releases", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"tag_name": "v0.9.0", "draft": false, "prerelease": false},
-			{"tag_name": "v1.0.0-rc.1", "draft": false, "prerelease": true},  // skip
-			{"tag_name": "not-semver", "draft": false, "prerelease": false},  // skip
+			{"tag_name": "v1.0.0-rc.1", "draft": false, "prerelease": true}, // skip
+			{"tag_name": "not-semver", "draft": false, "prerelease": false}, // skip
 			{"tag_name": "v1.1.0", "draft": false, "prerelease": false},
 			{"tag_name": "v1.0.0", "draft": false, "prerelease": false},
-			{"tag_name": "v0.8.0", "draft": false, "prerelease": false},      // will be truncated (cap=3)
-			{"tag_name": "v0.7.0", "draft": true, "prerelease": false},       // skip
+			{"tag_name": "v0.7.0", "draft": true, "prerelease": false}, // skip
 		})
 	})
 	commitTimes := map[string]string{
@@ -180,7 +182,7 @@ func TestListVersions_TakesNewestSemverAndSkipsPrerelease(t *testing.T) {
 		t.Fatalf("ListVersions: %v", err)
 	}
 	if len(versions) != 3 {
-		t.Fatalf("want 3 versions (cap), got %d", len(versions))
+		t.Fatalf("want 3 semver-tagged stable releases, got %d", len(versions))
 	}
 	want := []string{"1.1.0", "1.0.0", "0.9.0"}
 	for i, w := range want {

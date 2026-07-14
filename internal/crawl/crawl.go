@@ -21,6 +21,13 @@ import (
 // DefaultTopic is the discovery topic every publisher tags their repo with.
 const DefaultTopic = "jind-ai-plugin"
 
+// versionCap is the number of newest releases the crawler records per
+// plugin. Three is enough for install-latest, rollback, and compat
+// inspection without letting registry.json grow unboundedly (02_registry.md).
+// The cap lives here — not in the github client — because it is a
+// registry-emit policy, not a fact about GitHub.
+const versionCap = 3
+
 // GitHubClient is the crawler's view of the GitHub API. Consumer-defined so
 // tests can substitute an in-memory fake and the real implementation lives
 // in a package the crawler does not import back.
@@ -28,6 +35,10 @@ type GitHubClient interface {
 	SearchByTopic(ctx context.Context, topic string) ([]github.Repo, error)
 	GetManifest(ctx context.Context, repo, ref, path string) ([]byte, error)
 	ListVersions(ctx context.Context, repo, defaultBranch string) ([]github.Version, error)
+	// RawURL returns the raw file URL for a SHA-pinned path. Sourcing this
+	// from the client (rather than hardcoding raw.githubusercontent.com)
+	// lets a mocked RawBaseURL propagate to RegistryVersion.ManifestURL.
+	RawURL(repo, sha, path string) string
 }
 
 // Options configures one Run. Zero values apply sensible defaults except
@@ -86,7 +97,7 @@ func Run(ctx context.Context, opts Options) error {
 	// Steps 3-5 — Filter, fetch manifest, resolve versions.
 	cur := &state.CrawlResult{}
 	for _, repo := range repos {
-		if reason, skip := shouldSkip(repo); skip {
+		if reason := skipReason(repo); reason != "" {
 			logger.Printf("crawl: skip %s (%s)", repo.FullName, reason)
 			continue
 		}
@@ -112,22 +123,21 @@ func Run(ctx context.Context, opts Options) error {
 	return nil
 }
 
-// shouldSkip encodes the pre-processing filters from 03_crawler.md step 3.
-// It returns the human-readable reason so the caller can log it verbatim.
-func shouldSkip(r github.Repo) (string, bool) {
-	if r.Fork {
-		return "fork", true
+// skipReason encodes the pre-processing filters from 03_crawler.md step 3.
+// It returns a human-readable reason when the repo must be skipped, or ""
+// when the repo should proceed to manifest fetch.
+func skipReason(r github.Repo) string {
+	switch {
+	case r.Fork:
+		return "fork"
+	case r.Private:
+		return "private"
+	case r.Archived:
+		return "archived"
+	case r.DefaultBranch == "":
+		return "no default branch"
 	}
-	if r.Private {
-		return "private", true
-	}
-	if r.Archived {
-		return "archived", true
-	}
-	if r.DefaultBranch == "" {
-		return "no default branch", true
-	}
-	return "", false
+	return ""
 }
 
 // buildClaim resolves versions for the repo, fetches the manifest at the
@@ -141,6 +151,9 @@ func buildClaim(ctx context.Context, client GitHubClient, repo github.Repo) (*st
 	}
 	if len(versions) == 0 {
 		return nil, errors.New("no resolvable versions")
+	}
+	if len(versions) > versionCap {
+		versions = versions[:versionCap]
 	}
 	newest := versions[0]
 
@@ -166,7 +179,7 @@ func buildClaim(ctx context.Context, client GitHubClient, repo github.Repo) (*st
 			Version:     v.Version,
 			SHA:         v.SHA,
 			Tag:         v.Tag,
-			ManifestURL: rawManifestURL(repo.FullName, v.SHA),
+			ManifestURL: client.RawURL(repo.FullName, v.SHA, manifest.Filename),
 		})
 	}
 
@@ -180,22 +193,16 @@ func buildClaim(ctx context.Context, client GitHubClient, repo github.Repo) (*st
 	}, nil
 }
 
-// rawManifestURL builds the canonical raw.githubusercontent.com URL for a
-// SHA-pinned manifest. Used by RegistryVersion.ManifestURL so consumers can
-// hydrate a manifest without going through the GitHub API.
-func rawManifestURL(repo, sha string) string {
-	return fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s", repo, sha, manifest.Filename)
-}
-
-// summariseFindings collapses a list of findings into a short one-line
-// diagnostic for log output.
+// summariseFindings collapses error-severity findings into a short one-line
+// diagnostic. Warnings are dropped because a manifest that only warns still
+// installs; the caller only invokes this when HasErrors reported true.
 func summariseFindings(findings []manifest.Finding) string {
 	var msgs []string
 	for _, f := range findings {
 		if f.Severity != manifest.SeverityError {
 			continue
 		}
-		msgs = append(msgs, f.Message)
+		msgs = append(msgs, f.String())
 	}
 	s := strings.Join(msgs, "; ")
 	if len(s) > 200 {
@@ -203,4 +210,3 @@ func summariseFindings(findings []manifest.Finding) string {
 	}
 	return s
 }
-

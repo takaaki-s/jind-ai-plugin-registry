@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,12 +27,15 @@ func LoadPrev(path string) (*manifest.RegistryDocument, error) {
 		return emptyDoc(), nil
 	}
 
+	// A literal "{}" file is how the GHA workflow seeds a fresh state
+	// (03_crawler.md). Treat it as "no prior state" before the
+	// schema-version guard rejects it as SchemaVersion == 0.
+	if bytes.Equal(bytes.TrimSpace(data), []byte("{}")) {
+		return emptyDoc(), nil
+	}
 	var doc manifest.RegistryDocument
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, err
-	}
-	if doc.SchemaVersion == 0 && len(doc.Plugins) == 0 {
-		return emptyDoc(), nil
 	}
 	if doc.SchemaVersion != manifest.CurrentSchemaVersion {
 		return nil, &SchemaMismatchError{Got: doc.SchemaVersion, Want: manifest.CurrentSchemaVersion}

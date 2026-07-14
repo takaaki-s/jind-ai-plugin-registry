@@ -138,9 +138,6 @@ func splitByRepo(claims []Claim, target string) (*Claim, []Claim) {
 // (deterministic and audit-friendly) so the result never depends on map
 // iteration order.
 func chooseByCreatedAt(claims []Claim) (Claim, []Claim) {
-	if len(claims) == 1 {
-		return claims[0], nil
-	}
 	sorted := append([]Claim(nil), claims...)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		if !sorted[i].RepoCreatedAt.Equal(sorted[j].RepoCreatedAt) {
@@ -162,7 +159,7 @@ func applyClaim(entry manifest.RegistryEntry, c Claim) manifest.RegistryEntry {
 	entry.License = m.License
 	entry.JinCompat = m.Jin
 	entry.LatestVersion = c.LatestVersion
-	entry.Versions = append([]manifest.RegistryVersion(nil), c.Versions...)
+	entry.Versions = c.Versions
 	entry.UpdatedAt = c.UpdatedAt
 	return entry
 }

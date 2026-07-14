@@ -153,7 +153,9 @@ func TestRun_EndToEnd(t *testing.T) {
 		if len(alice.Versions) != 1 || alice.Versions[0].SHA != "sha-a" {
 			t.Errorf("alice versions wrong: %+v", alice.Versions)
 		}
-		wantURL := "https://raw.githubusercontent.com/alice/notifier/sha-a/jind-ai-plugin.yaml"
+		// manifest_url must reflect the client's configured RawBaseURL so
+		// mocks / staging mirrors do not leak the production host.
+		wantURL := srv.URL + "/raw/alice/notifier/sha-a/jind-ai-plugin.yaml"
 		if alice.Versions[0].ManifestURL != wantURL {
 			t.Errorf("manifest_url = %s, want %s", alice.Versions[0].ManifestURL, wantURL)
 		}
@@ -249,6 +251,9 @@ func (stubClient) GetManifest(context.Context, string, string, string) ([]byte, 
 }
 func (stubClient) ListVersions(context.Context, string, string) ([]github.Version, error) {
 	return nil, nil
+}
+func (stubClient) RawURL(repo, sha, path string) string {
+	return "stub://" + repo + "/" + sha + "/" + path
 }
 
 // helpers ----

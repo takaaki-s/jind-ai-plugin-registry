@@ -24,11 +24,6 @@ const DefaultBaseURL = "https://api.github.com"
 // different rate limits and mocking is cleaner when each is a distinct URL.
 const DefaultRawBaseURL = "https://raw.githubusercontent.com"
 
-// VersionCap is the number of newest releases the crawler records per plugin.
-// Kept at three per 02_registry.md — enough for install-latest, rollback,
-// and compat inspection without letting registry.json grow unboundedly.
-const VersionCap = 3
-
 // Config configures HTTPClient. Zero values apply sensible defaults except
 // for Token, which is required — the crawler always runs authenticated to
 // avoid the 60-req/h unauthenticated ceiling.
@@ -99,6 +94,14 @@ func (c *HTTPClient) SearchByTopic(ctx context.Context, topic string) ([]Repo, e
 		if err := c.getJSON(ctx, u, &resp); err != nil {
 			return nil, fmt.Errorf("search topic %q page %d: %w", topic, page, err)
 		}
+		if out == nil && resp.TotalCount > 0 {
+			// GitHub search API caps at 1000 results regardless of TotalCount.
+			n := resp.TotalCount
+			if n > 1000 {
+				n = 1000
+			}
+			out = make([]Repo, 0, n)
+		}
 		for _, it := range resp.Items {
 			out = append(out, it.toRepo())
 		}
@@ -108,6 +111,14 @@ func (c *HTTPClient) SearchByTopic(ctx context.Context, topic string) ([]Repo, e
 		page++
 	}
 	return out, nil
+}
+
+// RawURL is the canonical raw.githubusercontent.com URL for a SHA-pinned
+// file under this client's configured RawBaseURL. Callers use it to
+// populate RegistryVersion.ManifestURL so a mocked RawBaseURL (tests,
+// staging mirrors) does not leak the production host into registry.json.
+func (c *HTTPClient) RawURL(repo, sha, path string) string {
+	return fmt.Sprintf("%s/%s/%s/%s", strings.TrimRight(c.raw, "/"), repo, sha, path)
 }
 
 // GetManifest fetches the raw jind-ai-plugin.yaml at the given ref. ref may
@@ -141,9 +152,11 @@ func (c *HTTPClient) GetManifest(ctx context.Context, repo, ref, path string) ([
 // requested ref/path". Crawler treats this as a skip, not a hard fail.
 var ErrManifestMissing = errors.New("manifest missing")
 
-// ListVersions returns the newest N versions per VersionCap. It prefers
-// tagged releases (semver-sorted) and falls back to the default-branch
-// HEAD when the repository ships no releases. Non-semver tags are skipped.
+// ListVersions returns every resolvable stable release, newest first, or a
+// single HEAD entry when the repository ships no releases. Non-semver,
+// draft, and prerelease tags are skipped. Callers are responsible for
+// capping the list to the number the registry wants to publish — the
+// github package is deliberately unaware of that policy.
 func (c *HTTPClient) ListVersions(ctx context.Context, repo, defaultBranch string) ([]Version, error) {
 	releases, err := c.listReleases(ctx, repo)
 	if err != nil {
@@ -159,7 +172,7 @@ func (c *HTTPClient) ListVersions(ctx context.Context, repo, defaultBranch strin
 		}
 	}
 	// Fall back to default-branch HEAD.
-	commit, err := c.headOfBranch(ctx, repo, defaultBranch)
+	commit, err := c.commitOf(ctx, repo, defaultBranch)
 	if err != nil {
 		return nil, fmt.Errorf("resolve default branch %s of %s: %w", defaultBranch, repo, err)
 	}
@@ -180,9 +193,10 @@ func (c *HTTPClient) listReleases(ctx context.Context, repo string) ([]release, 
 	return out, nil
 }
 
-// resolveReleases takes the raw releases list and produces up to VersionCap
-// Version entries, sorted newest-first by semver. Drafts, prereleases, and
-// non-semver tags are skipped — the registry only surfaces stable releases.
+// resolveReleases turns raw releases into Version entries sorted
+// newest-first by semver. Drafts, prereleases, and non-semver tags are
+// dropped. The registry-side truncation (top-N) is applied by the caller,
+// not here.
 func (c *HTTPClient) resolveReleases(ctx context.Context, repo string, releases []release) ([]Version, error) {
 	type parsed struct {
 		release release
@@ -193,7 +207,7 @@ func (c *HTTPClient) resolveReleases(ctx context.Context, repo string, releases 
 		if r.Draft || r.Prerelease {
 			continue
 		}
-		v, err := semver.NewVersion(strings.TrimPrefix(r.TagName, "v"))
+		v, err := semver.NewVersion(r.TagName)
 		if err != nil {
 			continue
 		}
@@ -202,15 +216,12 @@ func (c *HTTPClient) resolveReleases(ctx context.Context, repo string, releases 
 	sort.Slice(kept, func(i, j int) bool {
 		return kept[i].ver.GreaterThan(kept[j].ver)
 	})
-	if len(kept) > VersionCap {
-		kept = kept[:VersionCap]
-	}
 
 	out := make([]Version, 0, len(kept))
 	for _, p := range kept {
 		// target_commitish is often a branch name; the reliable commit SHA
-		// comes from the git-ref API for the tag.
-		commit, err := c.commitForTag(ctx, repo, p.release.TagName)
+		// comes from the commits endpoint keyed on the tag itself.
+		commit, err := c.commitOf(ctx, repo, p.release.TagName)
 		if err != nil {
 			return nil, fmt.Errorf("resolve tag %s on %s: %w", p.release.TagName, repo, err)
 		}
@@ -231,23 +242,9 @@ type commit struct {
 	CommittedAt time.Time
 }
 
-// commitForTag resolves a tag to its underlying commit SHA and commit time.
-// It uses the commits endpoint (not git/refs) because commits/{ref} accepts
-// tags and returns the commit metadata in one round trip, whereas the git
-// ref endpoint can point at an annotated tag object requiring a second call.
-func (c *HTTPClient) commitForTag(ctx context.Context, repo, tag string) (*commit, error) {
-	return c.commitOf(ctx, repo, tag)
-}
-
-// headOfBranch resolves a branch name to its HEAD commit metadata. Same
-// endpoint as commitForTag; kept separate for clarity at call sites.
-func (c *HTTPClient) headOfBranch(ctx context.Context, repo, branch string) (*commit, error) {
-	return c.commitOf(ctx, repo, branch)
-}
-
-// commitOf is the shared implementation behind commitForTag and
-// headOfBranch — both endpoints resolve `commits/{ref}` where ref is either
-// a tag or a branch name.
+// commitOf resolves a ref (tag or branch name) to its commit SHA and
+// commit time. The commits/{ref} endpoint accepts both and returns the
+// commit metadata in a single round trip.
 func (c *HTTPClient) commitOf(ctx context.Context, repo, ref string) (*commit, error) {
 	u := fmt.Sprintf("%s/repos/%s/commits/%s", c.base, repo, url.PathEscape(ref))
 	var resp struct {
