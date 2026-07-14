@@ -1,0 +1,7 @@
+/public/
+/tmp/
+*.test
+*.out
+.DS_Store
+go.work
+go.work.sum
