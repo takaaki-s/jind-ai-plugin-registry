@@ -1,0 +1,45 @@
+name: crawl
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Fetch previous registry
+        run: |
+          mkdir -p public
+          curl -fsSL https://takaaki-s.github.io/jind-ai-plugin-registry/registry.json \
+            -o public/prev.json || echo '{}' > public/prev.json
+
+      - name: Run crawler
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          go run ./cmd/crawler \
+            -prev public/prev.json \
+            -out public/registry.json
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - uses: actions/deploy-pages@v4
