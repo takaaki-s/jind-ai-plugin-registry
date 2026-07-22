@@ -4,7 +4,7 @@ go 1.24.5
 
 require (
 	github.com/Masterminds/semver/v3 v3.5.0
-	github.com/takaaki-s/jind-ai v0.7.1
+	github.com/takaaki-s/jind-ai v0.9.0
 )
 
 require (

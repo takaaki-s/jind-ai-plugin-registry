@@ -31,7 +31,7 @@ func Merge(prev *manifest.RegistryDocument, cur *CrawlResult, now time.Time, gra
 	}
 
 	out := &manifest.RegistryDocument{
-		SchemaVersion: manifest.CurrentSchemaVersion,
+		SchemaVersion: manifest.CurrentRegistrySchemaVersion,
 		GeneratedAt:   now,
 		Plugins:       []manifest.RegistryEntry{},
 	}
