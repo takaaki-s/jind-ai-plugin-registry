@@ -131,8 +131,8 @@ func TestRun_EndToEnd(t *testing.T) {
 	if !got.GeneratedAt.Equal(now) {
 		t.Errorf("GeneratedAt = %v, want %v", got.GeneratedAt, now)
 	}
-	if got.SchemaVersion != manifest.CurrentSchemaVersion {
-		t.Errorf("SchemaVersion = %d, want %d", got.SchemaVersion, manifest.CurrentSchemaVersion)
+	if got.SchemaVersion != manifest.CurrentRegistrySchemaVersion {
+		t.Errorf("SchemaVersion = %d, want %d", got.SchemaVersion, manifest.CurrentRegistrySchemaVersion)
 	}
 	if len(got.Plugins) != 3 {
 		t.Fatalf("want 3 plugins (alice + bob + stale-orphaned), got %d: %+v", len(got.Plugins), pluginNames(got.Plugins))
@@ -182,6 +182,78 @@ func TestRun_EndToEnd(t *testing.T) {
 	// eve/broken must NOT appear.
 	if _, ok := byName["BadName!!!"]; ok {
 		t.Errorf("broken manifest should have been skipped")
+	}
+}
+
+// TestRun_AcceptsSchemaVersion2 locks in the schema_version:2 acceptance path.
+// The registry once shipped a jind-ai dependency pinned before schema_version 2
+// existed, so v2 manifests were rejected with "schema_version 2 not supported"
+// even though the plugin was well-formed. This test fails if that regression
+// returns — either via a downgrade of the manifest package or via
+// manifest.CurrentRegistrySchemaVersion getting recoupled with the manifest
+// schema constant.
+func TestRun_AcceptsSchemaVersion2(t *testing.T) {
+	now := mustParse("2026-07-14T12:00:00Z")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/search/repositories", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				repoJSON("carol/multi", "2025-08-01T00:00:00Z", "main", false, false),
+			},
+		})
+	})
+	mux.HandleFunc("/repos/carol/multi/releases", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"tag_name": "v0.2.0", "draft": false, "prerelease": false},
+		})
+	})
+	mux.HandleFunc("/repos/carol/multi/commits/v0.2.0", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(commitJSON("sha-c", "2026-07-05T00:00:00Z"))
+	})
+	mux.HandleFunc("/raw/carol/multi/sha-c/jind-ai-plugin.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(validManifestV2("multi-action")))
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client, err := github.NewHTTPClient(github.Config{
+		Token:      "test-token",
+		BaseURL:    srv.URL,
+		RawBaseURL: srv.URL + "/raw",
+		HTTPClient: srv.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPClient: %v", err)
+	}
+
+	tmp := t.TempDir()
+	prevPath := filepath.Join(tmp, "prev.json")
+	outPath := filepath.Join(tmp, "registry.json")
+	if err := os.WriteFile(prevPath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write prev: %v", err)
+	}
+
+	if err := Run(context.Background(), Options{
+		Client:   client,
+		PrevPath: prevPath,
+		OutPath:  outPath,
+		Now:      func() time.Time { return now },
+		Logger:   silentLogger(),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got := readDoc(t, outPath)
+	if len(got.Plugins) != 1 || got.Plugins[0].Name != "multi-action" {
+		t.Fatalf("v2 manifest did not land: %+v", got.Plugins)
+	}
+	// The registry document itself must stay on the registry-schema cadence,
+	// independent of the plugin manifest schema the crawler now accepts.
+	if got.SchemaVersion != manifest.CurrentRegistrySchemaVersion {
+		t.Errorf("registry.json SchemaVersion = %d, want %d",
+			got.SchemaVersion, manifest.CurrentRegistrySchemaVersion)
 	}
 }
 
@@ -305,6 +377,30 @@ install:
     entrypoint: bin/notifier
 on:
   - status_changed
+timeout: 30s
+`, name)
+}
+
+// validManifestV2 emits a schema_version:2 manifest — top-level entrypoint/on
+// gone, executable units declared under actions[]. Used by
+// TestRun_AcceptsSchemaVersion2 to lock in the acceptance path.
+func validManifestV2(name string) string {
+	return fmt.Sprintf(`schema_version: 2
+name: %s
+version: 0.2.0
+description: hello v2
+license: MIT
+homepage: https://example.com
+jin: ">=0.7.0"
+install:
+  source:
+    build:
+      - go build -o bin/notifier ./cmd/notifier
+actions:
+  - id: run
+    entrypoint: bin/notifier
+    on:
+      - status_changed
 timeout: 30s
 `, name)
 }

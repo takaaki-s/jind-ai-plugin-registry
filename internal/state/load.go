@@ -37,8 +37,8 @@ func LoadPrev(path string) (*manifest.RegistryDocument, error) {
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, err
 	}
-	if doc.SchemaVersion != manifest.CurrentSchemaVersion {
-		return nil, &SchemaMismatchError{Got: doc.SchemaVersion, Want: manifest.CurrentSchemaVersion}
+	if doc.SchemaVersion != manifest.CurrentRegistrySchemaVersion {
+		return nil, &SchemaMismatchError{Got: doc.SchemaVersion, Want: manifest.CurrentRegistrySchemaVersion}
 	}
 	return &doc, nil
 }
@@ -57,7 +57,7 @@ func (e *SchemaMismatchError) Error() string {
 
 func emptyDoc() *manifest.RegistryDocument {
 	return &manifest.RegistryDocument{
-		SchemaVersion: manifest.CurrentSchemaVersion,
+		SchemaVersion: manifest.CurrentRegistrySchemaVersion,
 		Plugins:       []manifest.RegistryEntry{},
 	}
 }
